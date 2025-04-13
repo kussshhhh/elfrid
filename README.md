@@ -1,1 +1,3 @@
-# alfred
+# Elfrid
+
+Elfrid is your own ai butler, it isnt an assistant you just have to instruct it minimally as you would do to a butler. It removes the overhead of remembering all the things you have to do, from physical fitness/nutrients, to career(managing your emails, your work, etc) to long term goals. it can just remember things for you. after an initiation ofc, where you describe your world model to the llm and how you like to do things. this will act as the core of the llm (more like a system prompt). after this you will have modes that llms can choose according to what its doing; meal plannning nutriton workout or career or college or ideation; you get the idea.

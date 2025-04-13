@@ -1,0 +1,7 @@
+.env
+backend/__pycache__
+prompts
+context.md
+backend/elfrid.db
+backend/test_db.py 
+backend/test_state.py 
