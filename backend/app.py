@@ -5,9 +5,11 @@ from flask import Flask, request, jsonify
 import db  # Import the db module from the same folder
 import google.generativeai as genai
 from dotenv import load_dotenv
+from pathlib import Path
 
-# Load environment variables
-load_dotenv()
+# Load .env file from parent directory
+env_path = Path(__file__).resolve().parent.parent / '.env'
+load_dotenv(dotenv_path=env_path)
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -31,8 +33,15 @@ class StateManager:
         
         # Initialize Gemini model
         try:
-            self.model = genai.GenerativeModel('gemini-pro')
+            self.model = genai.GenerativeModel('gemini-1.5-flash')
         except Exception as e:
+            # List available models for debugging
+            try:
+                models = genai.list_models()
+                model_names = [m.name for m in models]
+                print(f"Available models: {model_names}")
+            except Exception as list_error:
+                print(f"Failed to list models: {list_error}")
             raise RuntimeError(f"Failed to initialize Gemini model: {e}")
     
     def get_db(self):
@@ -42,10 +51,9 @@ class StateManager:
             SQLite connection with row_factory set and foreign keys enabled.
         """
         import sqlite3
-        # Use db_path for testing or default to elfrid.db for production
         conn = sqlite3.connect(self.db_path or 'backend/elfrid.db')
         conn.row_factory = sqlite3.Row
-        conn.execute('PRAGMA foreign_keys = ON')  # Ensure foreign key constraints
+        conn.execute('PRAGMA foreign_keys = ON')
         return conn
     
     def validate_user(self, user_id):
@@ -116,7 +124,6 @@ class StateManager:
             session_id = session_row["session_id"]
             chat_state = session_row["chat_state"]
         else:
-            # Create a new session if none exists
             session_id = self.new_session(user_id)
             chat_state = '{}'
         
@@ -131,17 +138,14 @@ Do you need more context, modes, or functions to respond? Return only a JSON arr
         needed_functions_response = await self.call_gemini(initial_prompt)
         
         try:
-            # Clean the response - handle code blocks or extra text
             cleaned_response = needed_functions_response.strip()
             if '```' in cleaned_response:
-                # Extract content from code blocks
                 code_block = cleaned_response.split('```')[1]
                 if code_block.startswith('json'):
-                    cleaned_response = code_block[4:].strip()  # Remove 'json' prefix
+                    cleaned_response = code_block[4:].strip()
                 else:
                     cleaned_response = code_block.strip()
             
-            # Extract JSON array
             if cleaned_response.startswith('[') and cleaned_response.endswith(']'):
                 json_start = cleaned_response.find('[')
                 json_end = cleaned_response.rfind(']') + 1
@@ -155,12 +159,10 @@ Do you need more context, modes, or functions to respond? Return only a JSON arr
             raise ValueError(f"LLM response must be a valid JSON array: {e}")
         
         # Step 3: Pipeline Step 2 - Execute requested queries
-        # These are not formal functions but identifiers for DB queries
         context = {}
         
         for function_name in needed_functions:
             if function_name == "get_schedule":
-                # Query memory table for schedules
                 cursor.execute(
                     "SELECT data FROM memory WHERE user_id = ? AND table_name = 'schedules' LIMIT 1", 
                     (user_id,)
@@ -169,7 +171,6 @@ Do you need more context, modes, or functions to respond? Return only a JSON arr
                 if result:
                     context["get_schedule"] = result["data"]
             elif function_name == "get_nutrition":
-                # Query memory table for nutrition
                 cursor.execute(
                     "SELECT data FROM memory WHERE user_id = ? AND table_name = 'nutrition' LIMIT 1", 
                     (user_id,)
@@ -205,21 +206,18 @@ Respond naturally as a formal, concise butler, choosing the best mode(s) if rele
     
     def new_session(self, user_id):
         """Create a new chat session for the user."""
-        # Validate user exists
         self.validate_user(user_id)
         
         conn = self.get_db()
         cursor = conn.cursor()
         timestamp = datetime.datetime.now()
         
-        # Insert new session with empty chat state
         cursor.execute(
             "INSERT INTO sessions (user_id, chat_state, timestamp) VALUES (?, ?, ?)",
             (user_id, '{}', timestamp)
         )
         conn.commit()
         
-        # Get the session_id of the newly created session
         session_id = cursor.lastrowid
         conn.close()
         
@@ -233,10 +231,8 @@ async def voice():
     Input: { "user_id": int, "input": str }
     Output: { "response": str }
     """
-    # Parse request
     data = request.json
     
-    # Validate request data
     if not data or "user_id" not in data or "input" not in data:
         return jsonify({"error": "Missing user_id or input"}), 400
     
@@ -244,7 +240,6 @@ async def voice():
     input_text = data["input"]
     
     try:
-        # Initialize state manager and process request
         state_manager = StateManager()
         response = await state_manager.process_request(user_id, input_text)
         return jsonify({"response": response})
@@ -252,7 +247,7 @@ async def voice():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         print(f"Error processing request: {e}")
-        return jsonify({"error": "Internal server error"}), 500
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/new_chat', methods=['POST'])
 def new_chat():
@@ -261,17 +256,14 @@ def new_chat():
     Input: { "user_id": int }
     Output: { "session_id": int }
     """
-    # Parse request
     data = request.json
     
-    # Validate request data
     if not data or "user_id" not in data:
         return jsonify({"error": "Missing user_id"}), 400
     
     user_id = data["user_id"]
     
     try:
-        # Initialize state manager and create new session
         state_manager = StateManager()
         session_id = state_manager.new_session(user_id)
         return jsonify({"session_id": session_id})
@@ -282,12 +274,9 @@ def new_chat():
         return jsonify({"error": "Internal server error"}), 500
 
 if __name__ == '__main__':
-    # Initialize the database
     db.init_db()
     
-    # Import and use Flask's async features
     import asyncio
-    from flask import Flask
     from asgiref.wsgi import WsgiToAsgi
     from hypercorn.asyncio import serve
     from hypercorn.config import Config
