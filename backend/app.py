@@ -5,6 +5,7 @@ import db
 import google.generativeai as genai
 from dotenv import load_dotenv
 from pathlib import Path
+from agents import get_time  
 
 env_path = Path(__file__).resolve().parent.parent / '.env'
 load_dotenv(dotenv_path=env_path)
@@ -43,8 +44,8 @@ class StateManager:
         """
         Process a user request through the Elfrid pipeline:
         1. Fetch initial context from DB.
-        2. Ask LLM for actions (read/update, memory/modes).
-        3. Execute actions via DB.
+        2. Ask LLM for actions (read/update/call, memory/modes/agents).
+        3. Execute actions via DB or agents.
         4. Generate final response with context and session logs.
         5. Log the interaction in DB.
         """
@@ -52,16 +53,21 @@ class StateManager:
         elfrid_prompt, world_model, modes_array, memory_tables, session_id, chat_state = db.get_context(user_id)
         session_logs = db.get_session_logs(session_id)
         
+        # Define available agents
+        available_agents = ["get_time"]
+        
         # Step 1: Ask LLM for actions
         initial_prompt = f"""You are Elfrid, analyzing a request.
 Available modes: {json.dumps(modes_array)}.
 Memory tables: {json.dumps(memory_tables)}.
+Available agents: {json.dumps(available_agents)}.
 Session history: {json.dumps(session_logs)}.
 Input: {input_text}.
 Return a JSON array of actions. Each action is an object:
 - For reading: {{"action": "read", "type": "memory"|"mode", "table_name": str}}
 - For updating: {{"action": "update", "type": "memory"|"mode", "table_name": str, "data": JSON string}}
-Example: [{{"action": "read", "type": "memory", "table_name": "nutrition"}}, {{"action": "update", "type": "mode", "table_name": "schedule", "data": "..."}}]
+- For calling: {{"action": "call", "type": "agent", "agent_name": str}}
+Example: [{{"action": "read", "type": "memory", "table_name": "nutrition"}}, {{"action": "call", "type": "agent", "agent_name": "get_time"}}]
 Return [] if no actions needed."""
         
         actions_response = await self.call_gemini(initial_prompt)
@@ -88,25 +94,19 @@ Return [] if no actions needed."""
             action_type = action.get("action")
             table_type = action.get("type")
             table_name = action.get("table_name")
+            agent_name = action.get("agent_name")
             data = action.get("data")
             
-            if not action_type or not table_type or not table_name:
+            if not action_type or not table_type:
                 print(f"Warning: Invalid action: {action}")
                 continue
             
-            if table_type == "memory":
-                if action_type == "read":
+            if action_type == "read":
+                if table_type == "memory":
                     result = db.execute_query(user_id, "read", table_name)
                     if result:
                         context[f"memory_{table_name}"] = result
-                elif action_type == "update":
-                    try:
-                        db.execute_query(user_id, "update", table_name, data)
-                        context[f"update_memory_{table_name}"] = f"Updated {table_name} successfully."
-                    except ValueError as e:
-                        context[f"update_memory_{table_name}"] = str(e)
-            elif table_type == "mode":
-                if action_type == "read":
+                elif table_type == "mode":
                     conn = db.get_db()
                     cursor = conn.cursor()
                     cursor.execute(
@@ -117,24 +117,38 @@ Return [] if no actions needed."""
                     db.close_db(conn)
                     if row:
                         context[f"mode_{table_name}"] = row["mode_data"]
-                elif action_type == "update":
+            elif action_type == "update":
+                if table_type == "memory":
                     try:
-                        json.loads(data)  # Validate JSON
+                        db.execute_query(user_id, "update", table_name, data)
+                        context[f"update_memory_{table_name}"] = f"Updated {table_name} successfully."
+                    except ValueError as e:
+                        context[f"update_memory_{table_name}"] = str(e)
+                elif table_type == "mode":
+                    try:
+                        json.loads(data)
                         db.update_mode(user_id, table_name, data)
                         context[f"update_mode_{table_name}"] = f"Updated {table_name} mode successfully."
                     except json.JSONDecodeError:
                         context[f"update_mode_{table_name}"] = "Invalid JSON data for mode update"
+            elif action_type == "call" and table_type == "agent":
+                if agent_name == "get_time":
+                    result = get_time.get_time()
+                    context[f"agent_{agent_name}"] = result
+                else:
+                    context[f"agent_{agent_name}"] = f"Unknown agent: {agent_name}"
         
         # Step 3: Generate final response
         final_prompt = f"""You are Elfrid, defined by: {elfrid_prompt}.
 User's world model: {world_model}.
 Available modes: {json.dumps(modes_array)}.
 Memory tables: {json.dumps(memory_tables)}.
+Available agents: {json.dumps(available_agents)}.
 Current session state: {chat_state}.
 Session history: {json.dumps(session_logs)}.
 Additional context: {json.dumps(context)}.
 Input: {input_text}.
-Respond naturally as a formal, concise butler, choosing the best mode(s) if relevant."""
+Respond naturally as a formal, concise butler, choosing the best mode(s) or agent(s) if relevant."""
         
         final_response = await self.call_gemini(final_prompt)
         
