@@ -69,11 +69,27 @@ def init_db():
         )
     ''')
 
+    # Enhanced butler prompt
+    enhanced_prompt = """You are Elfrid, a highly sophisticated AI butler with a formal yet warm demeanor. Your purpose is to serve with exceptional attention to detail and anticipate needs before they are expressed. Consider yourself the digital equivalent of a professional household manager.
+
+Your characteristics include:
+1. FORMAL PRECISION: Your language is polished and proper without being stiff.
+2. CONCISENESS: You provide complete information efficiently without unnecessary elaboration.
+3. PROACTIVITY: You anticipate needs based on context rather than asking questions.
+4. MEMORY UTILIZATION: You maintain impeccable records of preferences and important information.
+5. ADAPTABILITY: You gracefully pivot between different modes of service based on context.
+
+When responding to requests:
+- Acknowledge with a brief, formal address
+- Provide clear, actionable information
+- Take initiative to solve problems without excessive questioning
+- Maintain a consistent tone of dignified service"""
+
     cursor.execute('SELECT COUNT(*) FROM config')
     if cursor.fetchone()[0] == 0:
         cursor.execute(
             'INSERT INTO config (elfrid_prompt, created_at) VALUES (?, ?)',
-            ("You are Elfrid, a formal and concise AI butler.", datetime.now())
+            (enhanced_prompt, datetime.now())
         )
 
     conn.commit()
@@ -101,6 +117,140 @@ def validate_user(user_id):
     if count == 0:
         raise ValueError(f"User ID {user_id} not found")
     return True
+
+def create_table(table_name, schema):
+    """Create a custom table dynamically based on LLM's decision."""
+    if not all(c.isalnum() or c == '_' for c in table_name):
+        raise ValueError(f"Invalid table name: {table_name}")
+    
+    # Security check for schema
+    if ";" in schema and not schema.strip().endswith(";"):
+        raise ValueError("Invalid schema: multiple SQL statements not allowed")
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute(schema)
+        conn.commit()
+        close_db(conn)
+        return f"Table '{table_name}' created successfully"
+    except sqlite3.Error as e:
+        close_db(conn)
+        raise ValueError(f"Failed to create table: {e}")
+
+def execute_custom_query(query, params=None):
+    """Execute a custom SQL query (read-only for safety)."""
+    # Security check - ensure it's a SELECT query
+    if not query.strip().lower().startswith("select"):
+        raise ValueError("Only SELECT queries are allowed through this method")
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    try:
+        if params:
+            cursor.execute(query, params)
+        else:
+            cursor.execute(query)
+            
+        results = [dict(row) for row in cursor.fetchall()]
+        close_db(conn)
+        return results
+    except sqlite3.Error as e:
+        close_db(conn)
+        raise ValueError(f"Query execution failed: {e}")
+
+def insert_data(table_name, data_dict):
+    """Insert data into any table."""
+    if not all(c.isalnum() or c == '_' for c in table_name):
+        raise ValueError(f"Invalid table name: {table_name}")
+    
+    if not isinstance(data_dict, dict) or not data_dict:
+        raise ValueError("Data must be a non-empty dictionary")
+    
+    columns = list(data_dict.keys())
+    values = list(data_dict.values())
+    placeholders = ", ".join(["?"] * len(values))
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    try:
+        query = f"INSERT INTO {table_name} ({', '.join(columns)}) VALUES ({placeholders})"
+        cursor.execute(query, values)
+        row_id = cursor.lastrowid
+        conn.commit()
+        close_db(conn)
+        return f"Data inserted into '{table_name}' with ID {row_id}"
+    except sqlite3.Error as e:
+        close_db(conn)
+        raise ValueError(f"Failed to insert data: {e}")
+
+def update_data(table_name, condition_dict, data_dict):
+    """Update data in any table."""
+    if not all(c.isalnum() or c == '_' for c in table_name):
+        raise ValueError(f"Invalid table name: {table_name}")
+    
+    if not isinstance(data_dict, dict) or not data_dict:
+        raise ValueError("Data must be a non-empty dictionary")
+    
+    if not isinstance(condition_dict, dict) or not condition_dict:
+        raise ValueError("Condition must be a non-empty dictionary")
+    
+    set_clause = ", ".join([f"{col} = ?" for col in data_dict.keys()])
+    where_clause = " AND ".join([f"{col} = ?" for col in condition_dict.keys()])
+    
+    params = list(data_dict.values()) + list(condition_dict.values())
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    try:
+        query = f"UPDATE {table_name} SET {set_clause} WHERE {where_clause}"
+        cursor.execute(query, params)
+        affected_rows = cursor.rowcount
+        conn.commit()
+        close_db(conn)
+        return f"Updated {affected_rows} rows in '{table_name}'"
+    except sqlite3.Error as e:
+        close_db(conn)
+        raise ValueError(f"Failed to update data: {e}")
+
+def list_tables():
+    """List all tables in the database."""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    tables = [row["name"] for row in cursor.fetchall()]
+    
+    close_db(conn)
+    return tables
+
+def get_schema(table_name=None):
+    """Get schema information for database tables."""
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    schemas = {}
+    
+    if table_name:
+        if not all(c.isalnum() or c == '_' for c in table_name):
+            close_db(conn)
+            raise ValueError(f"Invalid table name: {table_name}")
+            
+        cursor.execute(f"SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table_name,))
+        result = cursor.fetchone()
+        if result:
+            schemas[table_name] = result["sql"]
+    else:
+        cursor.execute("SELECT name, sql FROM sqlite_master WHERE type='table'")
+        for row in cursor.fetchall():
+            schemas[row["name"]] = row["sql"]
+    
+    close_db(conn)
+    return schemas
 
 def new_session(user_id):
     """Create a new chat session for the user."""
@@ -139,6 +289,9 @@ def get_context(user_id):
     cursor.execute("SELECT DISTINCT table_name FROM memory WHERE user_id = ?", (user_id,))
     memory_tables = [row["table_name"] for row in cursor.fetchall()]
     
+    # Add all database tables to provide full context
+    db_tables = list_tables()
+    
     cursor.execute(
         "SELECT session_id, chat_state FROM sessions WHERE user_id = ? ORDER BY timestamp DESC LIMIT 1",
         (user_id,)
@@ -154,7 +307,7 @@ def get_context(user_id):
     
     close_db(conn)
     
-    return elfrid_prompt, world_model, modes_array, memory_tables, session_id, chat_state
+    return elfrid_prompt, world_model, modes_array, memory_tables, db_tables, session_id, chat_state
 
 def get_session_logs(session_id):
     """Fetch all logs for a given session_id."""
@@ -171,17 +324,7 @@ def get_session_logs(session_id):
     return logs
 
 def execute_query(user_id, action, table_name, data=None):
-    """
-    Execute a query on the memory table.
-    Args:
-        user_id: Integer ID of the user.
-        action: String, either 'read' or 'update'.
-        table_name: String name of the memory table (e.g., 'nutrition').
-        data: String JSON data for updates (optional).
-    Returns:
-        For 'read': Query result (string) or None if not found.
-        For 'update': None (updates the DB).
-    """
+    """Execute a query on the memory table."""
     validate_user(user_id)
     conn = get_db()
     cursor = conn.cursor()
@@ -227,13 +370,7 @@ def execute_query(user_id, action, table_name, data=None):
         raise ValueError("Invalid action: must be 'read' or 'update'")
 
 def update_mode(user_id, mode_name, new_data):
-    """
-    Update or insert data in the modes table for a user.
-    Args:
-        user_id: Integer ID of the user.
-        mode_name: String name of the mode (e.g., 'schedule').
-        new_data: String JSON data to store.
-    """
+    """Update or insert data in the modes table for a user."""
     validate_user(user_id)
     
     conn = get_db()
